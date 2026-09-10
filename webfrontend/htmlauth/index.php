@@ -362,6 +362,17 @@ body.theme-glass-disabled .mp-app {
           <div class="field"><label>Buzzer-Topic</label><input type="text" id="p-buzzer-topic" placeholder="miraipanel/buzzer/warning"></div>
         </div>
         <div class="row">
+          <div class="field"><label>Audioserver-Host (IP)</label><input type="text" id="p-audioserver-host" placeholder="192.168.179.14"></div>
+          <div class="field" style="max-width:160px;"><label>Audioserver-Zone (Nr.)</label><input type="number" id="p-audioserver-zone" min="0"></div>
+        </div>
+        <div style="font-size:12px;color:var(--txt2);margin:-6px 0 10px;">
+          Nur nötig, wenn die Bridge selbst Titel/Cover/Lautstärke live an die
+          obige Audio-Zone publizieren soll (echter Loxone Audioserver oder
+          Sonn Core, dessen Zonen-Nummer identisch mit der oben) — leer
+          lassen, wenn der Audioserver/Sonn Core das MQTT-Publizieren schon
+          selbst übernimmt.
+        </div>
+        <div class="row">
           <div class="field"><label>Schlaf-Steuerung (Schalter)</label><input type="text" list="switch-control-datalist" id="p-sleep-cmd"></div>
           <div class="field" style="max-width:160px;"><label>Sleep-Dauer (Minuten)</label><input type="number" id="p-sleep-minutes" value="5" min="1"></div>
         </div>
@@ -890,6 +901,8 @@ async function selectPanel(idx) {
   document.getElementById('p-ip').value   = p.ip   || '';
   document.getElementById('p-audio-zone').value    = p.audio_zone_topic || '';
   document.getElementById('p-buzzer-topic').value  = p.buzzer_topic || '';
+  document.getElementById('p-audioserver-host').value = p.audioserver_host || '';
+  document.getElementById('p-audioserver-zone').value = p.audioserver_zone ?? '';
   document.getElementById('p-sleep-cmd').value     = p.sleep_cmd_uuid || '';
   document.getElementById('p-sleep-minutes').value = p.sleep_minutes || 5;
   document.getElementById('p-notify-cmd').value    = p.notify_cmd_uuid || '';
@@ -908,6 +921,8 @@ function newPanel() {
   document.getElementById('p-ip').value   = '';
   document.getElementById('p-audio-zone').value    = '';
   document.getElementById('p-buzzer-topic').value  = 'miraipanel/buzzer/warning';
+  document.getElementById('p-audioserver-host').value = '';
+  document.getElementById('p-audioserver-zone').value = '';
   document.getElementById('p-sleep-cmd').value     = '';
   document.getElementById('p-sleep-minutes').value = 5;
   document.getElementById('p-notify-cmd').value    = '';
@@ -1119,11 +1134,18 @@ async function savePanel() {
   document.querySelectorAll('[data-sensor]').forEach(el => {
     sensor_targets[el.dataset.sensor] = el.value.trim();
   });
+  // audioserver_zone bewusst null statt '' bei leerem Feld (nicht 0 per
+  // parseInt('')||0 — Zone 0 wäre sonst nicht von "nicht konfiguriert" zu
+  // unterscheiden) — setupAudioZones() in bridge.js überspringt Panels ohne
+  // audioserver_host/audioserver_zone komplett.
+  const audioserverZoneRaw = document.getElementById('p-audioserver-zone').value.trim();
   const panel = {
     name, ip, room_uuid: roomUuid, room_name: roomName, controls,
     hw_keys, sensor_targets,
     audio_zone_topic: document.getElementById('p-audio-zone').value.trim(),
     buzzer_topic:     document.getElementById('p-buzzer-topic').value.trim(),
+    audioserver_host: document.getElementById('p-audioserver-host').value.trim(),
+    audioserver_zone: audioserverZoneRaw === '' ? null : parseInt(audioserverZoneRaw, 10),
     sleep_cmd_uuid:   document.getElementById('p-sleep-cmd').value.trim(),
     sleep_minutes:    parseInt(document.getElementById('p-sleep-minutes').value) || 5,
     notify_cmd_uuid:  document.getElementById('p-notify-cmd').value.trim(),
