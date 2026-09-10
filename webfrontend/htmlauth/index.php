@@ -364,13 +364,19 @@ body.theme-glass-disabled .mp-app {
         <div class="row">
           <div class="field"><label>Audioserver-Host (IP)</label><input type="text" id="p-audioserver-host" placeholder="192.168.179.14"></div>
           <div class="field" style="max-width:160px;"><label>Audioserver-Zone (Nr.)</label><input type="number" id="p-audioserver-zone" min="0"></div>
+          <div class="field" style="max-width:140px;justify-content:flex-end;">
+            <label>&nbsp;</label>
+            <button type="button" class="btn btn-secondary" onclick="scanAudioZones()">Zonen suchen</button>
+          </div>
         </div>
+        <div id="audio-zone-results" style="display:none;margin:-4px 0 10px;font-size:13px;"></div>
         <div style="font-size:12px;color:var(--txt2);margin:-6px 0 10px;">
           Nur nötig, wenn die Bridge selbst Titel/Cover/Lautstärke live an die
           obige Audio-Zone publizieren soll (echter Loxone Audioserver oder
           Sonn Core, dessen Zonen-Nummer identisch mit der oben) — leer
           lassen, wenn der Audioserver/Sonn Core das MQTT-Publizieren schon
-          selbst übernimmt.
+          selbst übernimmt. "Zonen suchen" braucht nur den Host oben (fragt
+          kurz beim Audioserver an, ca. 3 Sekunden).
         </div>
         <div class="row">
           <div class="field"><label>Schlaf-Steuerung (Schalter)</label><input type="text" list="switch-control-datalist" id="p-sleep-cmd"></div>
@@ -783,6 +789,41 @@ async function testLoxone() {
     const r = await api('lox_test');
     toast(r.ok ? 'Loxone erreichbar ✓' : 'Fehler: ' + r.error, r.ok ? 'ok' : 'err');
   } catch(e) { toast('Fehler: ' + e.message, 'err'); }
+}
+
+// ── Audio-Zonen suchen ───────────────────────────────────────────
+// Fragt die Bridge (bin/bridge.js, lokaler Scan-Server) statt selbst per
+// WebSocket beim Audioserver nachzufragen — erspart eine zweite WS-
+// Implementierung nur fürs Web-UI. ~3s Wartezeit, siehe api.php/bridge.js.
+async function scanAudioZones() {
+  const host = document.getElementById('p-audioserver-host').value.trim();
+  const box  = document.getElementById('audio-zone-results');
+  if (!host) { toast('Erst Audioserver-Host eintragen', 'err'); return; }
+  box.style.display = 'block';
+  box.innerHTML = 'Suche Zonen …';
+  try {
+    const zones = await api('scan_audio_zones', 'POST', { host });
+    if (!zones.length) {
+      box.innerHTML = 'Keine Zonen gefunden — IP prüfen, Audioserver erreichbar?';
+      return;
+    }
+    box.innerHTML = '';
+    zones.forEach(z => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn btn-secondary btn-sm';
+      btn.textContent = `${z.playerid} — ${z.name || '(ohne Namen)'}`;
+      btn.style.marginRight = '6px';
+      btn.style.marginBottom = '6px';
+      btn.onclick = () => {
+        document.getElementById('p-audioserver-zone').value = z.playerid;
+        toast(`Zone ${z.playerid} (${z.name}) übernommen`);
+      };
+      box.appendChild(btn);
+    });
+  } catch(e) {
+    box.innerHTML = 'Fehler: ' + e.message;
+  }
 }
 
 // ── Konfiguration sichern & wiederherstellen ────────────────────

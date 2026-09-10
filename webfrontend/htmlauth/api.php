@@ -475,6 +475,24 @@ switch ($action) {
         echo json_encode(['ok'=>true, 'out'=>$out]);
         break;
 
+    // ── Zonen am Audioserver suchen (Panel-Editor: Audioserver-Host/Zone) ──
+    // Fragt bridge.js' lokalen Scan-Server ab (127.0.0.1-only, siehe dort
+    // startZoneScanServer/ZONE_SCAN_PORT) statt selbst eine WS-Verbindung
+    // aufzubauen — nutzt so dieselbe, schon vorhandene AudioserverClient-
+    // Logik. Braucht den laufenden miraibridge-Dienst.
+    case 'scan_audio_zones':
+        $host = trim($body['host'] ?? '');
+        $port = (int)($body['port'] ?? 7091);
+        if ($host === '') err('Audioserver-Host fehlt');
+        $url = 'http://127.0.0.1:17091/scan-zones?host=' . urlencode($host) . '&port=' . $port;
+        // Timeout > die 3s, die bridge.js für den Scan selbst braucht.
+        $ctx = stream_context_create(['http' => ['timeout' => 6]]);
+        $result = @file_get_contents($url, false, $ctx);
+        if ($result === false) err('Bridge nicht erreichbar — läuft der Dienst?', 502, 'ERR');
+        header('Content-Type: application/json');
+        echo $result;
+        break;
+
     default:
         err('Unbekannte Aktion', 404);
 }

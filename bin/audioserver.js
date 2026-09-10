@@ -31,6 +31,7 @@ class AudioserverClient extends EventEmitter {
     this.wsPath = wsPath;
     this.ws = null;
     this.closed = false;
+    this.connected = false;
     // playerid -> zuletzt emittierter State, für Dedup (siehe _handleEvent).
     this._lastState = new Map();
     this._connect();
@@ -43,7 +44,11 @@ class AudioserverClient extends EventEmitter {
     const ws = new WebSocket(url);
     this.ws = ws;
 
-    ws.on('open', () => console.log(`[audioserver] ${this.host}: verbunden`));
+    ws.on('open', () => {
+      console.log(`[audioserver] ${this.host}: verbunden`);
+      this.connected = true;
+      this.emit('open');
+    });
 
     ws.on('message', (data) => {
       let parsed;
@@ -62,6 +67,8 @@ class AudioserverClient extends EventEmitter {
 
     ws.on('close', () => {
       if (this.closed) return;
+      this.connected = false;
+      this.emit('close');
       console.warn(`[audioserver] ${this.host}: Verbindung getrennt, reconnect in ${RECONNECT_DELAY_MS}ms`);
       setTimeout(() => this._connect(), RECONNECT_DELAY_MS);
     });
@@ -88,6 +95,18 @@ class AudioserverClient extends EventEmitter {
   close() {
     this.closed = true;
     if (this.ws) this.ws.close();
+  }
+
+  // Für die Zonen-Suche im Web-UI (siehe bridge.js startZoneScanServer):
+  // liest den intern für Dedup gepflegten Zustand aus, statt auf frische
+  // 'zone'-Events zu warten — bei einer schon länger laufenden Verbindung
+  // (z.B. weil setupAudioZones() dieselbe Verbindung schon für eine
+  // konfigurierte Zone nutzt) kommen sonst nur für gerade AKTIV spielende
+  // Zonen neue Events rein (audio_event kommt initial für alle Zonen auf
+  // einmal, danach nur noch bei echten Änderungen) — ruhige/pausierte
+  // Zonen wären dann in einem Zeitfenster-basierten Scan unsichtbar.
+  getKnownZones() {
+    return [...this._lastState.entries()].map(([playerid, state]) => ({ playerid, name: state.name }));
   }
 }
 

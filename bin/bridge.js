@@ -230,17 +230,54 @@ function setupAudioZones(cfg, mqttClient) {
     console.log(`[audio] Panel "${panel.name}": Zone ${zoneNum} @ ${host} <-> ${topicBase}`);
 
     const client = getAudioserverClient(host, wsPort);
+    // audioserver.js dedupt nur den GESAMTEN State — da "time" (Elapsed)
+    // real jede Sekunde hochzählt, gilt der State immer als "geändert" und
+    // ein 'zone'-Event kommt jede Sekunde neu rein. Ohne die Prüfung unten
+    // würden dabei auch Titel/Artist/Album/Cover/State/Volume/Source jede
+    // Sekunde erneut publiziert, obwohl die sich gar nicht geändert haben
+    // (auf Hardware beobachtet, 2026-09-10: 8 MQTT-Messages/Sekunde statt 2).
+    // Deshalb hier zusätzlich pro Feld gegen den zuletzt publizierten Wert
+    // vergleichen — nur Elapsed/Duration ticken bewusst immer mit.
+    let lastPublished = {};
     client.on('zone', (pid, state) => {
       if (String(pid) !== String(zoneNum) || !mqttClient.connected) return;
-      mqttClient.publish(`${topicBase}/source/name`, state.station || state.name, { qos: 0, retain: true });
-      mqttClient.publish(`${topicBase}/track/title`,   state.title,  { qos: 0, retain: true });
-      mqttClient.publish(`${topicBase}/track/artist`,  state.artist, { qos: 0, retain: true });
-      mqttClient.publish(`${topicBase}/track/album`,   state.album,  { qos: 0, retain: true });
-      mqttClient.publish(`${topicBase}/track/coverUrl`, state.cover, { qos: 0, retain: true });
-      mqttClient.publish(`${topicBase}/state`,  state.playing ? 'playing' : 'paused', { qos: 0, retain: true });
-      mqttClient.publish(`${topicBase}/volume`, String(state.volume),   { qos: 0, retain: true });
-      mqttClient.publish(`${topicBase}/elapsed`,  String(state.time),     { qos: 0, retain: false });
-      mqttClient.publish(`${topicBase}/duration`, String(state.duration), { qos: 0, retain: false });
+      const publishIfChanged = (key, topic, value, retain = true) => {
+        if (lastPublished[key] === value) return;
+        lastPublished[key] = value;
+        mqttClient.publish(topic, String(value), { qos: 0, retain });
+      };
+      publishIfChanged('source', `${topicBase}/source/name`,   state.station || state.name);
+      // Zonenname (z.B. "Esszimmer") - eigenes Topic, getrennt von
+      // source/name (Radiosender/Quelle) - zeigt oben rechts im Widget an
+      // (lbl_AudioZoneName/_ov, siehe mqtt_router.yaml topic==base+"/name").
+      publishIfChanged('zonename', `${topicBase}/name`, state.name);
+      publishIfChanged('title',  `${topicBase}/track/title`,   state.title);
+      publishIfChanged('artist', `${topicBase}/track/artist`,  state.artist);
+      publishIfChanged('album',  `${topicBase}/track/album`,   state.album);
+      publishIfChanged('cover',  `${topicBase}/track/coverUrl`, state.cover);
+      publishIfChanged('state',  `${topicBase}/state`,         state.playing ? 'playing' : 'paused');
+      publishIfChanged('volume', `${topicBase}/volume`,        state.volume);
+      publishIfChanged('online', `${topicBase}/server/online`, '1');
+      // duration bleibt über den ganzen Track gleich — nur bei echtem
+      // Wechsel (neuer Track) neu publizieren, nicht jede Sekunde mit.
+      publishIfChanged('duration', `${topicBase}/duration`, state.duration, false);
+      // position dagegen bewusst IMMER publizieren (tickt jede Sekunde
+      // real hoch) — Firmware erwartet "position", nicht "elapsed" (siehe
+      // mqtt_router.yaml topic==base+"/position" — Fortschrittsbalken).
+      mqttClient.publish(`${topicBase}/position`, String(state.time), { qos: 0, retain: false });
+    });
+
+    // Eigenes Online/Offline-Signal statt des bisherigen Topic_AudioPrefix-
+    // Wegs (den nur Sonn Cores natives Publishing bedient hatte — unsere
+    // Bridge kannte den zugehörigen Prefix bisher gar nicht und hat da nie
+    // etwas publiziert). Unter demselben audio_zone_topic-Stamm statt einem
+    // eigenen Server-weiten Prefix: pro Panel/Zone eigenes Flag, dafür kein
+    // zusätzliches Config-Feld nötig — sieht die Firmware jetzt zusätzlich
+    // zu ap+"server/online" (siehe mqtt_router.yaml).
+    client.on('close', () => {
+      if (!mqttClient.connected) return;
+      lastPublished.online = '0';
+      mqttClient.publish(`${topicBase}/server/online`, '0', { qos: 0, retain: true });
     });
 
     zones.push({ topicBase, host, httpPort, zoneNum, panelName: panel.name });
@@ -505,6 +542,62 @@ async function main() {
   console.log(`[lox] Verbinde mit ${loxConn.host}:${loxConn.port || 80}…`);
   loxApi.connect();
 }
+
+// ── Zonen-Scan für die Config-UI ────────────────────────────────────────
+// Nur 127.0.0.1, NIE von außen erreichbar — api.php (läuft auf demselben
+// Host) fragt das per file_get_contents() ab, wenn im Web-UI auf "Zonen
+// suchen" geklickt wird (siehe Panel-Editor, Audioserver-Host/Zone). Erspart
+// das manuelle "Probe-Skript laufen lassen und JSON lesen"-Prozedere von
+// vorher — nutzt exakt dieselbe AudioserverClient-Verbindung/-Logik wie der
+// normale Zonen-Betrieb (siehe setupAudioZones), nur einmalig und mit
+// Timeout statt dauerhaft.
+//
+// Bekannte Einschränkung: für jeden je abgefragten (auch falschen/getippten)
+// Host bleibt über getAudioserverClient() eine dauerhafte WS-Verbindung
+// bestehen (inkl. eigenem Reconnect-Loop, siehe audioserver.js) — bei
+// gelegentlicher manueller Nutzung im Web-UI vernachlässigbar, kein Cleanup
+// vorgesehen.
+const ZONE_SCAN_PORT = 17091;
+
+function startZoneScanServer(port) {
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, `http://127.0.0.1:${port}`);
+    if (url.pathname !== '/scan-zones') {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
+    const host = url.searchParams.get('host');
+    const wsPort = parseInt(url.searchParams.get('port'), 10) || 7091;
+    if (!host) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'host fehlt' }));
+      return;
+    }
+
+    console.log(`[scan] Zonen-Suche gestartet: ${host}:${wsPort}`);
+    const client = getAudioserverClient(host, wsPort);
+
+    // Aus dem Zonen-Cache lesen (getKnownZones()), nicht auf frische 'zone'-
+    // Events warten: bei einer schon länger laufenden Verbindung (z.B. weil
+    // eine konfigurierte Zone dieselbe Verbindung schon nutzt) kommen sonst
+    // nur für gerade AKTIV spielende Zonen neue Events — ruhige/pausierte
+    // Zonen wären unsichtbar, obwohl der Cache sie längst kennt (auf
+    // Hardware beobachtet 2026-09-10: nur 1 von 4 Zonen gefunden). Trotzdem
+    // kurz warten, falls die Verbindung gerade erst neu aufgebaut wird und
+    // den initialen Dump noch nicht empfangen hat.
+    setTimeout(() => {
+      const result = client.getKnownZones().sort((a, b) => a.playerid - b.playerid);
+      console.log(`[scan] ${result.length} Zone(n) gefunden für ${host}:${wsPort}`);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
+    }, 3000);
+  });
+  server.on('error', (e) => console.error('[scan] Server-Fehler:', e.message));
+  server.listen(port, '127.0.0.1', () => console.log(`[scan] Zonen-Scan-Server auf 127.0.0.1:${port}`));
+}
+
+startZoneScanServer(ZONE_SCAN_PORT);
 
 main().catch(e => {
   console.error('[bridge] Fataler Fehler:', e);
