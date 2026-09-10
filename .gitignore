@@ -1,0 +1,20 @@
+# Build-Artefakte - nie einchecken (sonst verschachtelt sich beim naechsten
+# Packen ein alter Zip im neuen, siehe KNXtoLOX-Erfahrung).
+*.zip
+
+# Node: node_modules wird bei jeder Installation frisch von postinstall.sh
+# via "npm install" erzeugt (siehe README), nie eingecheckt.
+node_modules/
+
+# Python-Bytecode-Cache (dev/mock_server.py)
+__pycache__/
+*.pyc
+
+# Echter LoxAPP3.json-Dump der eigenen Installation (Raumnamen, UUIDs) -
+# Debug-Artefakt, gehoert nicht in den Sourcecode.
+Structure_file.txt
+
+# Laufzeit-Cache (lox_structure.json etc.) - wird von bridge.js selbst
+# angelegt (fs.mkdirSync), nicht Teil des Sourcecodes.
+data/
+.claude/

@@ -1,0 +1,57 @@
+{
+  "loxone": {
+    "msno": 1
+  },
+  "global": {},
+  "panels": [
+    {
+      "name": "esrdg",
+      "ip": "a5ujz",
+      "room_uuid": "room-kueche",
+      "room_name": "Kueche",
+      "controls": {
+        "ctrl-heiz-ku": {
+          "type": "IRoomControllerV2",
+          "widget": "content_heating"
+        },
+        "ctrl-licht-ku": {
+          "type": "LightControllerV2",
+          "widget": "content_light"
+        },
+        "ctrl-sw1-ku": {
+          "type": "Switch",
+          "widget": "content_switch1"
+        },
+        "ctrl-sw2-ku": {
+          "type": "TimedSwitch",
+          "widget": "content_switch2"
+        }
+      },
+      "hw_keys": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      "sensor_targets": {
+        "room_temp": "",
+        "room_humidity": "",
+        "co2": "",
+        "voc": "",
+        "pir": "",
+        "mic": "",
+        "brightness": "",
+        "lux": "",
+        "power": ""
+      },
+      "audio_zone_topic": "",
+      "buzzer_topic": "miraipanel/buzzer/warning",
+      "sleep_cmd_uuid": "",
+      "sleep_minutes": 5
+    }
+  ]
+}

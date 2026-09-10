@@ -1,0 +1,14 @@
+#!/bin/bash
+# Uninstall (laeuft als User "root"): systemd-Service der Bridge sauber entfernen.
+
+SERVICE_NAME="miraibridge"
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+
+if systemctl list-unit-files | grep -q "^${SERVICE_NAME}.service"; then
+    systemctl stop "$SERVICE_NAME" 2>/dev/null
+    systemctl disable "$SERVICE_NAME" 2>/dev/null
+fi
+rm -f "$SERVICE_FILE"
+systemctl daemon-reload
+
+exit 0

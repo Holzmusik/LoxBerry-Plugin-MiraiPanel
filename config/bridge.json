@@ -1,0 +1,14 @@
+{
+  "loxone": {
+    "msno": 1
+  },
+  "global": {
+    "time_uuid": "",
+    "date_uuid": "",
+    "dow_uuid": "",
+    "year_uuid": "",
+    "outside_temp_uuid": "",
+    "outside_humidity_uuid": ""
+  },
+  "panels": []
+}

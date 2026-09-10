@@ -1,0 +1,17 @@
+{
+  "name": "miraibridge",
+  "version": "0.2.0",
+  "description": "Loxone ↔ MQTT Bridge für MiraiPanel-Geräte",
+  "main": "bridge.js",
+  "scripts": {
+    "start": "node bridge.js"
+  },
+  "dependencies": {
+    "mqtt": "^5.3.4",
+    "node-lox-ws-api": "alladdin/node-lox-ws-api",
+    "ws": "^8.16.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
