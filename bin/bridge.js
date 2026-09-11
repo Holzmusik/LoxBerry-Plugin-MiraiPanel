@@ -310,8 +310,18 @@ function setupAudioZones(cfg, mqttClient) {
     let cmdPath;
     switch (sub) {
       case 'state':    cmdPath = payload === 'playing' ? 'play' : 'pause'; break;
-      case 'next':     cmdPath = 'next'; break;
-      case 'previous': cmdPath = 'prev'; break;
+      // "next"/"prev" (Miniserver-jdev/sps/io-Namen, siehe Kommentar oben)
+      // waren für DIESE Route falsch geraten — die Box beantwortet JEDEN
+      // Pfad mit HTTP 200 und einem leeren "<name>_result":[] (Echo-
+      // Handler ohne Validierung), ohne dass etwas passiert. Auf Hardware
+      // verifiziert (2026-09-11, per curl + Loxone-App-Beobachtung):
+      // "queueplus"/"queueminus" schalten den Titel wirklich um UND liefern
+      // ein gefülltes "<name>_result":{"action":"..."} statt eines leeren
+      // Arrays — das lässt sich als Signal für "echtes Kommando erkannt"
+      // nutzen, siehe echte openapi.yaml-Doku (mr-manuel/Loxone_api_
+      // documentation), "Zone Queue"-Endpunkte.
+      case 'next':     cmdPath = 'queueplus';  break;
+      case 'previous': cmdPath = 'queueminus'; break;
       case 'volume': {
         const vol = Math.max(0, Math.min(100, parseInt(payload, 10) || 0));
         cmdPath = `volume/${vol}`;
@@ -325,14 +335,33 @@ function setupAudioZones(cfg, mqttClient) {
   });
 }
 
-// GET http://<host>:<port>/audio/<zone>/<cmdPath> — auf Hardware verifiziert
-// (siehe Kommentar oben), Antwort z.B. {"play_result":[],"command":"audio/5/play"}.
-// Reine GET-Anfrage reicht, Body wird nicht ausgewertet (nur Statuscode fürs Log).
+// GET http://<host>:<port>/audio/<zone>/<cmdPath>. Achtung (auf Hardware
+// verifiziert 2026-09-11): die Box beantwortet JEDEN Pfad mit HTTP 200 —
+// auch frei erfundene Kommandos — über einen Echo-Handler ohne Validierung.
+// HTTP 200 beweist also nicht, dass das Kommando etwas bewirkt hat. Einziger
+// beobachtete Unterschied: ein echtes/erkanntes Kommando liefert ein
+// GEFÜLLTES "<cmd>_result" (z.B. {"action":"queueplus"}), ein unbekanntes
+// ein LEERES Array ("<cmd>_result":[]) — das hier als grobe Heuristik
+// ausgewertet und geloggt, damit ein zukünftiger Tippfehler/falsch geratener
+// Kommandoname nicht wieder stillschweigend nichts bewirkt.
 function sendAudioserverCommand(host, port, zone, cmdPath) {
   const url = `http://${host}:${port}/audio/${zone}/${cmdPath}`;
   http.get(url, (res) => {
-    res.resume(); // Antwort muss konsumiert werden, sonst hält http.get den Socket offen.
-    console.log(`[audio] ${url} -> HTTP ${res.statusCode}`);
+    let body = '';
+    res.on('data', (chunk) => { body += chunk; });
+    res.on('end', () => {
+      console.log(`[audio] ${url} -> HTTP ${res.statusCode}`);
+      try {
+        const parsed = JSON.parse(body);
+        const resultKey = Object.keys(parsed).find((k) => k.endsWith('_result'));
+        const result = resultKey && parsed[resultKey];
+        if (Array.isArray(result) && result.length === 0) {
+          console.warn(`[audio] "${cmdPath}" liefert ein leeres Ergebnis zurück — vermutlich kein echtes Kommando (Box validiert Pfade nicht, siehe Kommentar)`);
+        }
+      } catch {
+        // Antwort kein JSON — nicht weiter auswertbar, Statuscode oben reicht als Log.
+      }
+    });
   }).on('error', (e) => console.error(`[audio] Kommando fehlgeschlagen (${url}):`, e.message));
 }
 
