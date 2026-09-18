@@ -9,6 +9,7 @@ if systemctl list-unit-files | grep -q "^${SERVICE_NAME}.service"; then
     systemctl disable "$SERVICE_NAME" 2>/dev/null
 fi
 rm -f "$SERVICE_FILE"
+rm -f /etc/logrotate.d/miraibridge
 systemctl daemon-reload
 
 exit 0

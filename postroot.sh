@@ -99,4 +99,21 @@ systemctl restart "$SERVICE_NAME"
 echo "Service Status:"
 systemctl status "$SERVICE_NAME" --no-pager || true
 
+# Logrotate installieren (2026-09-18: ohne das wachsen Logdateien
+# unbegrenzt - real beobachtet: bridge.log auf 64,5MB, siehe
+# Session-Notizen zum easeemqtt/knxmqtt/miraibridge-Vorfall). $RESOLVED_PLOG
+# ist hier bereits der echte, aufgeloeste Pfad (siehe oben) - kein
+# REPLACELBP*-Platzhalter-Problem moeglich, da direkt per Heredoc erzeugt.
+cat > /etc/logrotate.d/miraibridge <<EOF
+${RESOLVED_PLOG}/*.log {
+    size 5M
+    rotate 3
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+EOF
+
 exit 0

@@ -5,6 +5,7 @@ const path = require('path');
 const http = require('http');
 const mqtt = require('mqtt');
 const { getAudioserverClient } = require('./audioserver');
+const loxberrylog = require('./loxberrylog');
 
 // ── Pfade: LoxBerry vs. lokale Entwicklung ─────────────────
 // Auf dem LoxBerry liegen bin/, config/, data/ und log/ in
@@ -12,6 +13,14 @@ const { getAudioserverClient } = require('./audioserver');
 // sind sie Geschwister-Ordner neben bin/.
 const LBHOMEDIR = process.env.LBHOMEDIR || '';
 const PLUGIN_FOLDER = path.basename(__dirname); // 'miraibridge' auf LoxBerry, 'bin' lokal
+
+// Macht LoxBerrys "Log-Level"-Schalter (Plugin-Verwaltung) fuer die
+// hochfrequenten Zeilen ([cmd]/[latenz]/[state], je Befehl/Zustands-
+// aenderung EINE Zeile) nutzbar - real bestaetigt als Hauptursache fuer
+// unkontrolliertes Wachstum von bridge.log (2026-09-18). Siehe
+// bin/loxberrylog.js (identisch zum Schwester-Plugin KNXtoLOX).
+const logLevel = loxberrylog.create(PLUGIN_FOLDER, LBHOMEDIR);
+
 const PATHS = LBHOMEDIR
   ? {
       cfg:  path.join(LBHOMEDIR, 'config', 'plugins', PLUGIN_FOLDER, 'bridge.json'),
@@ -484,7 +493,7 @@ async function main() {
     mqttClient.publish(topic, String(value), { qos: 0, retain: true });
     if (!publishedOnce.has(key)) {
       publishedOnce.add(key);
-      console.log(`[state] ${topic} = ${String(value).substring(0, 80)}`);
+      if (logLevel.enabled(logLevel.DEBUG)) console.log(`[state] ${topic} = ${String(value).substring(0, 80)}`);
     }
   }
 
@@ -525,7 +534,7 @@ async function main() {
     const sentAt = pendingCommands.get(key);
     if (sentAt !== undefined) {
       pendingCommands.delete(key);
-      console.log(`[latenz] ${key}: ${Date.now() - sentAt}ms (MQTT-Befehl → Loxone-Rückmeldung)`);
+      if (logLevel.enabled(logLevel.DEBUG)) console.log(`[latenz] ${key}: ${Date.now() - sentAt}ms (MQTT-Befehl → Loxone-Rückmeldung)`);
     }
     publishState(uuid, value);
   }
@@ -558,7 +567,7 @@ async function main() {
       console.error(`[cmd] Keine Loxone-Verbindung — Befehl verworfen: ${key} = ${value}`);
       return;
     }
-    console.log(`[cmd] jdev/sps/io/${key}/${value}`);
+    if (logLevel.enabled(logLevel.DEBUG)) console.log(`[cmd] jdev/sps/io/${key}/${value}`);
     try {
       pendingCommands.set(key, Date.now());
       loxApi.send_command(`jdev/sps/io/${key}/${value}`);
