@@ -1,0 +1,282 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 70a7e6b..16553b9 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -2,6 +2,24 @@
+ 
+ Alle nennenswerten Änderungen an diesem Plugin werden hier festgehalten.
+ 
++## [Unreleased] - 2026-09-21
++
++### Bugfix (Bridge)
++- **Veraltete Daten nach Miniserver-Ausfall beim Bridge-Start** — war der
++  Miniserver beim Start nicht erreichbar (`LoxAPP3.json nicht erreichbar:
++  ECONNREFUSED`), blieb der State-Filter dauerhaft leer und `publishState()`
++  verwarf alle Werte, obwohl der WebSocket später authentifiziert war. Zusätzlich
++  fiel die Seriennummer auf `msno` zurück (falsches Topic-Präfix `mirai/lox/1/…`).
++  Jetzt: Struktur wird bei jedem `get_structure_file`-Event des WebSockets neu
++  übernommen (Filter, Seriennummer, Cmd-Abo), mit Cache-Fallback
++  (`lox_structure.json`) für den Start.
++- **Reconnect-Schleife ohne Pause** — `node-lox-ws-api` initialisiert
++  `_reconnect_time` nie (→ 0 ms); jetzt explizit 5 s.
++- `fetchLoxStructure()`: Timeout (10 s) + HTTP-Statuscheck.
++- Watchdog: `[lox] Authentifiziert, aber keine Struktur erhalten` als Error.
++- Zeitstempel in allen Log-Zeilen; kein "Unerwartetes Topic"-Rauschen mehr für
++  `mirai/audio/…`.
++
+ ## [Unreleased] - 2026-07-16
+ 
+ ### Neu (MiraiPanel-LCD + Plugin)
+diff --git a/bin/bridge.js b/bin/bridge.js
+index e6c1720..440ab30 100644
+--- a/bin/bridge.js
++++ b/bin/bridge.js
+@@ -21,6 +21,13 @@ const PLUGIN_FOLDER = path.basename(__dirname); // 'miraibridge' auf LoxBerry, '
+ // bin/loxberrylog.js (identisch zum Schwester-Plugin KNXtoLOX).
+ const logLevel = loxberrylog.create(PLUGIN_FOLDER, LBHOMEDIR);
+ 
++// Zeitstempel vor jeder Log-Zeile — ohne war bisher nicht nachvollziehbar, wie
++// lange z.B. ein Miniserver-Ausfall oder eine Reconnect-Schleife gedauert hat.
++for (const lvl of ['log', 'warn', 'error']) {
++  const orig = console[lvl].bind(console);
++  console[lvl] = (...args) => orig(new Date().toISOString(), ...args);
++}
++
+ const PATHS = LBHOMEDIR
+   ? {
+       cfg:  path.join(LBHOMEDIR, 'config', 'plugins', PLUGIN_FOLDER, 'bridge.json'),
+@@ -111,7 +118,7 @@ function loadMqttConn() {
+ // }
+ 
+ // ── Loxone Struktur laden ──────────────────────────────────
+-function fetchLoxStructure(lox) {
++function fetchLoxStructure(lox, timeoutMs = 10000) {
+   return new Promise((resolve, reject) => {
+     const auth = Buffer.from(`${lox.user}:${lox.pass}`).toString('base64');
+     const options = {
+@@ -120,14 +127,23 @@ function fetchLoxStructure(lox) {
+       path: '/data/LoxAPP3.json',
+       headers: { 'Authorization': 'Basic ' + auth }
+     };
+-    http.get(options, (res) => {
++    const req = http.get(options, (res) => {
++      if (res.statusCode !== 200) {
++        res.resume();
++        reject(new Error(`HTTP ${res.statusCode}`));
++        return;
++      }
+       let data = '';
+       res.on('data', chunk => data += chunk);
+       res.on('end', () => {
+         try { resolve(JSON.parse(data)); }
+         catch (e) { reject(e); }
+       });
+-    }).on('error', reject);
++    });
++    // Ohne Timeout hängt ein halboffener Socket das gesamte main() (und damit
++    // MQTT + Audio) für immer.
++    req.setTimeout(timeoutMs, () => req.destroy(new Error(`Timeout nach ${timeoutMs}ms`)));
++    req.on('error', reject);
+   });
+ }
+ 
+@@ -397,39 +413,95 @@ async function main() {
+   console.log(`[bridge] Miniserver: ${loxConn.host}:${loxConn.port}`);
+   console.log(`[bridge] MQTT-Broker: ${mqttConn.host}:${mqttConn.port}`);
+ 
+-  // Loxone Struktur einmalig laden
++  // Struktur-abhängiger Zustand. Wird beim Start (HTTP oder Cache) gesetzt und
++  // bei JEDEM späteren Erhalt der Struktur über den WebSocket (Event
++  // 'get_structure_file', kommt nach jeder erfolgreichen Authentifizierung)
++  // neu aufgebaut. Früher wurde LoxAPP3.json nur einmal beim Start geholt: war
++  // der Miniserver dann noch nicht erreichbar (z.B. nach Stromausfall), blieb
++  // stateFilter dauerhaft leer und publishState() verwarf jeden Wert, obwohl
++  // der WebSocket später sauber authentifiziert war.
+   let loxStructure = null;
++  let structureLive = false; // true = Struktur direkt vom Miniserver (nicht Cache)
++  let msSerial = String(cfg.loxone.msno);
++  let stateFilter = new Set();
++  let mqttClient = null;
++  let loxCmdTopic = null;
++
++  const controlCount = cfg.panels.reduce((s, p) => s + Object.keys(p.controls || {}).length, 0);
++  const globalCount  = Object.values(cfg.global || {}).filter(Boolean).length;
++  const cachePath = path.join(PATHS.data, 'lox_structure.json');
++
++  // Panel → Loxone: die Firmware schreibt (Sensor-Werte, Heizung-Sollwert,
++  // Jalousie-Up/Down-Pulse etc.) immer auf "<Topic_LoxPrefix><ziel-uuid>/cmd"
++  // (siehe MiraiPanel-LCD/MiraiPanel.yaml, z.B. RoomTemperature-Sensor-Handler).
++  // Topic_LoxPrefix wird von uns selbst auf "mirai/lox/<serial>/" gesetzt
++  // (siehe api.php build_topics/"lox_prefix"), die Bridge muss also genau
++  // dieses Schema abonnieren, nicht ein eigenes. Wird bei geänderter Serial
++  // (Fallback → echte Seriennummer) umgestellt.
++  function subscribeLoxCmd() {
++    if (!mqttClient || !mqttClient.connected) return;
++    const wanted = `mirai/lox/${msSerial}/+/cmd`;
++    if (loxCmdTopic && loxCmdTopic !== wanted) mqttClient.unsubscribe(loxCmdTopic);
++    loxCmdTopic = wanted;
++    mqttClient.subscribe(wanted, { qos: 0 }, (err) => {
++      if (err) console.error(`[mqtt] Abo von ${wanted} fehlgeschlagen:`, err.message);
++      else console.log(`[mqtt] Panel-Kommandos abonniert: ${wanted}`);
++    });
++  }
++
++  function applyStructure(structure, source, live) {
++    if (!structure || !structure.controls) return false;
++    loxStructure = structure;
++    if (live) structureLive = true;
++    const oldSerial = msSerial;
++    msSerial = (structure.msInfo && structure.msInfo.serialNr) || String(cfg.loxone.msno);
++    stateFilter = buildStateFilter(cfg, structure);
++    console.log(`[bridge] Struktur aktiv (${source}): ${stateFilter.size} State-UUIDs aus ${controlCount} Controls + ${globalCount} globalen Werten`);
++    if (stateFilter.size > 0) {
++      if (logLevel.enabled(logLevel.DEBUG)) {
++        for (const uuid of stateFilter) console.log(`[topics] mirai/lox/${msSerial}/${uuid}`);
++      }
++    } else {
++      console.warn('[bridge] Keine State-UUIDs — bitte Panel mit echten Loxone-Controls konfigurieren');
++    }
++    if (msSerial !== oldSerial) {
++      console.warn(`[bridge] Miniserver-Seriennummer ${oldSerial} → ${msSerial}, MQTT-Abo wird umgestellt`);
++      subscribeLoxCmd();
++    }
++    return true;
++  }
++
++  function cacheStructure(structure) {
++    try {
++      fs.mkdirSync(PATHS.data, { recursive: true });
++      fs.writeFileSync(cachePath, JSON.stringify(structure, null, 2));
++    } catch (e) {
++      console.warn('[bridge] lox_structure.json konnte nicht geschrieben werden:', e.message);
++    }
++  }
++
+   try {
+-    loxStructure = await fetchLoxStructure(loxConn);
++    const fetched = await fetchLoxStructure(loxConn);
+     console.log('[bridge] LoxAPP3.json geladen');
+-    const cachePath = path.join(PATHS.data, 'lox_structure.json');
+-    fs.mkdirSync(PATHS.data, { recursive: true });
+-    fs.writeFileSync(cachePath, JSON.stringify(loxStructure, null, 2));
++    cacheStructure(fetched);
++    applyStructure(fetched, 'HTTP', true);
+   } catch (e) {
+     console.warn('[bridge] LoxAPP3.json nicht erreichbar:', e.message);
+-  }
+-
+-  // Miniserver-Seriennummer aus LoxAPP3.json — wird Teil der MQTT-Topics
+-  const msSerial = (loxStructure && loxStructure.msInfo && loxStructure.msInfo.serialNr)
+-                    || String(cfg.loxone.msno);
+-
+-  // State-UUID-Filter: nur konfigurierte Controls + globale Werte forwarden
+-  // (nicht alles wie lox2mqtt)
+-  const stateFilter = buildStateFilter(cfg, loxStructure);
+-  const controlCount = cfg.panels.reduce((s, p) => s + Object.keys(p.controls || {}).length, 0);
+-  const globalCount  = Object.values(cfg.global || {}).filter(Boolean).length;
+-  console.log(`[bridge] ${stateFilter.size} State-UUIDs aus ${controlCount} Controls + ${globalCount} globalen Werten aktiv`);
+-  if (stateFilter.size > 0) {
+-    // Alle aktiven Topics einmalig beim Start ausgeben
+-    for (const uuid of stateFilter) {
+-      console.log(`[topics] mirai/lox/${msSerial}/${uuid}`);
++    // Fallback: zuletzt gecachte Struktur, damit Serial/Filter von Anfang an
++    // stimmen. Sobald der WebSocket authentifiziert ist, ersetzt die Live-
++    // Struktur diese (siehe 'get_structure_file' weiter unten).
++    try {
++      const cached = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
++      if (applyStructure(cached, 'Cache', false)) {
++        console.warn('[bridge] Verwende gecachte Struktur bis der Miniserver antwortet');
++      }
++    } catch (_) {
++      console.warn('[bridge] Kein Struktur-Cache vorhanden — warte auf WebSocket-Struktur');
+     }
+-  } else {
+-    console.warn('[bridge] Keine State-UUIDs — bitte Panel mit echten Loxone-Controls konfigurieren');
+   }
+ 
+   // ── MQTT Client ──────────────────────────────────────────
+-  const mqttClient = mqtt.connect({
++  mqttClient = mqtt.connect({
+     host:     mqttConn.host,
+     port:     mqttConn.port,
+     username: mqttConn.user,
+@@ -445,20 +517,11 @@ async function main() {
+   // falls kein Panel audioserver_host/audioserver_zone konfiguriert hat.
+   setupAudioZones(cfg, mqttClient);
+ 
+-  // Panel → Loxone: die Firmware schreibt (Sensor-Werte, Heizung-Sollwert,
+-  // Jalousie-Up/Down-Pulse etc.) immer auf "<Topic_LoxPrefix><ziel-uuid>/cmd"
+-  // (siehe MiraiPanel-LCD/MiraiPanel.yaml, z.B. RoomTemperature-Sensor-Handler).
+-  // Topic_LoxPrefix wird von uns selbst auf "mirai/lox/<serial>/" gesetzt
+-  // (siehe api.php build_topics/"lox_prefix"), die Bridge muss also genau
+-  // dieses Schema abonnieren, nicht ein eigenes.
+-  const loxCmdTopic = `mirai/lox/${msSerial}/+/cmd`;
+-
++  // Abo (neu) setzen bei jedem (Re-)Connect — clean:true, Session-State geht
++  // beim Reconnect verloren. Siehe subscribeLoxCmd() weiter oben.
+   mqttClient.on('connect', () => {
+     console.log('[mqtt] Verbunden mit Broker');
+-    mqttClient.subscribe(loxCmdTopic, { qos: 0 }, (err) => {
+-      if (err) console.error(`[mqtt] Abo von ${loxCmdTopic} fehlgeschlagen:`, err.message);
+-      else console.log(`[mqtt] Panel-Kommandos abonniert: ${loxCmdTopic}`);
+-    });
++    subscribeLoxCmd();
+   });
+ 
+   // Panel → Loxone ist bewusst ungefiltert: JEDE UUID, die das Panel unter
+@@ -468,6 +531,8 @@ async function main() {
+   // per Wildcard-Abo sowieso nur exakt das empfangen, was die Firmware selbst
+   // unter mirai/lox/<serial>/+/cmd sendet.
+   mqttClient.on('message', (topic, message) => {
++    // Audio-Topics (mirai/audio/...) behandelt setupAudioZones() selbst.
++    if (!topic.startsWith('mirai/lox/')) return;
+     const cmdMatch = topic.match(/^mirai\/lox\/([^/]+)\/([^/]+)\/cmd$/);
+     if (!cmdMatch) {
+       console.warn(`[cmd] Unerwartetes Topic ignoriert: ${topic}`);
+@@ -509,16 +574,44 @@ async function main() {
+     30000
+   );
+ 
++  // node-lox-ws-api ruft in reconnect() setTimeout(..., this._reconnect_time)
++  // auf, initialisiert _reconnect_time aber nirgends → undefined → 0 ms. Bei
++  // nicht erreichbarem Miniserver (Boot, Netz weg) entsteht dadurch eine
++  // Reconnect-Schleife ohne Pause (im Log: hunderte "Verbindung getrennt /
++  // Reconnect…" in Folge). Daher hier explizit setzen.
++  loxApi._reconnect_time = 5000;
++
+   // Merkt, ob die Loxone-WS-Verbindung aktuell authentifiziert ist — Befehle,
+   // die davor ankommen (z.B. Panel published direkt nach eigenem Boot,
+   // während die Bridge noch verbindet), würden sonst stillschweigend verloren
+   // gehen, ohne dass das im Log auftaucht.
+   let loxAuthorized = false;
+-  loxApi.on('authorized',      () => { loxAuthorized = true; console.log('[lox] Authentifiziert ✓'); });
++  let structureWatchdog = null;
++  loxApi.on('authorized',      () => {
++    loxAuthorized = true;
++    console.log('[lox] Authentifiziert ✓');
++    // Die Lib holt LoxAPP3.json nach jeder Authentifizierung selbst und meldet
++    // sie per 'get_structure_file'. Bleibt das aus, wären wir verbunden, aber
++    // ohne Filter — das soll nicht mehr still passieren.
++    clearTimeout(structureWatchdog);
++    structureWatchdog = setTimeout(() => {
++      if (loxAuthorized && !structureLive) {
++        console.error('[lox] Authentifiziert, aber keine Struktur (LoxAPP3.json) erhalten — State-Updates werden verworfen');
++      }
++    }, 30000);
++  });
++  // Live-Struktur vom Miniserver: ersetzt Start-/Cache-Zustand und baut
++  // stateFilter + Seriennummer neu auf (läuft synchron VOR enablebinstatusupdate,
++  // die initialen Werte landen also schon im neuen Filter).
++  loxApi.on('get_structure_file', (structure) => {
++    console.log('[lox] Struktur (LoxAPP3.json) per WebSocket erhalten');
++    cacheStructure(structure);
++    applyStructure(structure, 'WebSocket', true);
++  });
+   loxApi.on('auth_failed',     () => { loxAuthorized = false; console.error('[lox] Authentifizierung fehlgeschlagen'); });
+   loxApi.on('connect_failed',  () => { loxAuthorized = false; console.error('[lox] Verbindung fehlgeschlagen'); });
+   loxApi.on('connection_error',(e) => console.error('[lox] Fehler:', e && e.message || e));
+-  loxApi.on('close',           () => { loxAuthorized = false; console.warn('[lox] Verbindung getrennt'); });
++  loxApi.on('close',           () => { loxAuthorized = false; structureLive = false; console.warn('[lox] Verbindung getrennt'); });
+   loxApi.on('reconnect',       () => console.log('[lox] Reconnect…'));
+ 
+   // ── Latenz-Messung: MQTT-Befehl empfangen → Loxone meldet neue State ──
