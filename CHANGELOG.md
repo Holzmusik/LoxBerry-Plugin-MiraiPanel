@@ -2,6 +2,14 @@
 
 Alle nennenswerten Änderungen an diesem Plugin werden hier festgehalten.
 
+## [Unreleased] - 2026-09-22 (3)
+
+### Sonstiges
+- **Repo umbenannt**: `LoxBerry-Plugin-MiraiPanel` → `LoxBerry-Plugin-MiraiBridge`
+  (passend zum tatsächlichen Plugin-Namen `TITLE=MiraiBridge`, klarer
+  abgegrenzt von den MiraiPanel-Firmware-/Hardware-Repos). `plugin.cfg`/
+  `release.cfg`/`prerelease.cfg` auf die neuen URLs umgestellt.
+
 ## [Unreleased] - 2026-09-22 (2)
 
 ### Fix (Bridge)
