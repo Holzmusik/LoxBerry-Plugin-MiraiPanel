@@ -2,6 +2,24 @@
 
 Alle nennenswerten Änderungen an diesem Plugin werden hier festgehalten.
 
+## [Unreleased] - 2026-09-21
+
+### Bugfix (Bridge)
+- **Veraltete Daten nach Miniserver-Ausfall beim Bridge-Start** — war der
+  Miniserver beim Start nicht erreichbar (`LoxAPP3.json nicht erreichbar:
+  ECONNREFUSED`), blieb der State-Filter dauerhaft leer und `publishState()`
+  verwarf alle Werte, obwohl der WebSocket später authentifiziert war. Zusätzlich
+  fiel die Seriennummer auf `msno` zurück (falsches Topic-Präfix `mirai/lox/1/…`).
+  Jetzt: Struktur wird bei jedem `get_structure_file`-Event des WebSockets neu
+  übernommen (Filter, Seriennummer, Cmd-Abo), mit Cache-Fallback
+  (`lox_structure.json`) für den Start.
+- **Reconnect-Schleife ohne Pause** — `node-lox-ws-api` initialisiert
+  `_reconnect_time` nie (→ 0 ms); jetzt explizit 5 s.
+- `fetchLoxStructure()`: Timeout (10 s) + HTTP-Statuscheck.
+- Watchdog: `[lox] Authentifiziert, aber keine Struktur erhalten` als Error.
+- Zeitstempel in allen Log-Zeilen; kein "Unerwartetes Topic"-Rauschen mehr für
+  `mirai/audio/…`.
+
 ## [Unreleased] - 2026-07-16
 
 ### Neu (MiraiPanel-LCD + Plugin)
