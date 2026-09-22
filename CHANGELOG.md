@@ -2,6 +2,14 @@
 
 Alle nennenswerten Änderungen an diesem Plugin werden hier festgehalten.
 
+## [Unreleased] - 2026-09-22 (2)
+
+### Fix (Bridge)
+- **Log-Zeitstempel zeigten UTC statt Lokalzeit** — `toISOString()` gibt
+  immer UTC zurück, unabhängig von der System-Zeitzone. Jetzt über die
+  Date-Getter (`getHours()` etc.) formatiert, die die System-Zeitzone des
+  LoxBerry verwenden (Europe/Berlin inkl. Sommerzeit).
+
 ## [Unreleased] - 2026-09-22
 
 ### Bugfix (Bridge)

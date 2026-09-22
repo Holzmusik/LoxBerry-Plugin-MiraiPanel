@@ -23,9 +23,21 @@ const logLevel = loxberrylog.create(PLUGIN_FOLDER, LBHOMEDIR);
 
 // Zeitstempel vor jeder Log-Zeile — ohne war bisher nicht nachvollziehbar, wie
 // lange z.B. ein Miniserver-Ausfall oder eine Reconnect-Schleife gedauert hat.
+// Lokalzeit statt toISOString() (2026-09-22): Date.prototype.toISOString()
+// gibt IMMER UTC zurück, unabhängig von der System-Zeitzone des LoxBerry -
+// im Log stand dadurch z.B. 09:11 Uhr, obwohl es lokal (Europe/Berlin,
+// Sommerzeit UTC+2) tatsächlich 11:11 Uhr war. Die Date-Getter (getHours()
+// etc.) verwenden dagegen die System-Zeitzone, genau wie sie z.B. `date`
+// auf der Kommandozeile des LoxBerry anzeigen würde.
+function localTimestamp() {
+  const d = new Date();
+  const pad = (n, w = 2) => String(n).padStart(w, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+         `T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`;
+}
 for (const lvl of ['log', 'warn', 'error']) {
   const orig = console[lvl].bind(console);
-  console[lvl] = (...args) => orig(new Date().toISOString(), ...args);
+  console[lvl] = (...args) => orig(localTimestamp(), ...args);
 }
 
 const PATHS = LBHOMEDIR
