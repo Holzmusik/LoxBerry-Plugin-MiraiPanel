@@ -2,6 +2,22 @@
 
 Alle nennenswerten Änderungen an diesem Plugin werden hier festgehalten.
 
+## [Unreleased] - 2026-09-22
+
+### Bugfix (Bridge)
+- **`Cannot read properties of undefined (reading 'prepare_secure_command')`
+  bei jedem Reconnect nach Miniserver-Reboot** — `sendToLoxone()` prüfte vor
+  dem Senden `loxApi.is_connected()`, das in `node-lox-ws-api` nur
+  `this.connection !== undefined` (Transport-Ebene) bedeutet. Nach jedem
+  (Re-)Connect steht die WebSocket-Verbindung aber schon, bevor der
+  asynchrone Auth-Handshake (`this._auth`, von `send_command()` benötigt)
+  neu aufgebaut ist — in diesem Fenster war `is_connected()` schon `true`,
+  `this._auth` aber noch `undefined`. Jetzt wird stattdessen `loxAuthorized`
+  geprüft (exakt auf das `authorized`-Event getaktet), Befehle in diesem
+  Fenster werden sauber verworfen statt einen Fehler zu werfen. Auf
+  Hardware reproduziert bei einem echten Miniserver-Reboot (Log vom
+  2026-09-22).
+
 ## [Unreleased] - 2026-09-21
 
 ### Bugfix (Bridge)

@@ -645,8 +645,23 @@ async function main() {
   // node-lox-ws-api's send_command() hat keinerlei Fehlerbehandlung/Rückgabe
   // (kein Callback, kein Promise, keine Prüfung ob die Verbindung überhaupt
   // steht) — ein interner Fehler (z.B. Verbindung/Auth noch nicht bereit)
-  // geht sonst komplett lautlos unter. Deshalb hier explizit absichern und
-  // is_connected() vorab prüfen.
+  // geht sonst komplett lautlos unter. Deshalb hier explizit absichern.
+  //
+  // NICHT über is_connected() prüfen (Bug, 2026-09-22 auf Hardware
+  // reproduziert — Log zeigte wiederholt "send_command fehlgeschlagen ...
+  // Cannot read properties of undefined (reading 'prepare_secure_command')"
+  // während eines Reconnects nach Miniserver-Reboot): is_connected() prüft
+  // in node-lox-ws-api nur `this.connection !== undefined` (Transport-Ebene)
+  // — die Property wird synchron gesetzt, sobald die WebSocket-Verbindung
+  // steht (API.connect() → register_connection()), aber der Auth-Handshake
+  // (this._auth, benötigt von send_command() für prepare_secure_command())
+  // läuft danach noch asynchron über mehrere Round-Trips und wird erst bei
+  // erfolgreicher Auth neu erzeugt (siehe register_auth_object() in
+  // node-lox-ws-api/lib/API.js). Es gibt also nach jedem (Re-)Connect ein
+  // reales Zeitfenster, in dem is_connected()==true, aber this._auth noch
+  // undefined ist — genau das Fenster, das den Crash auslöste. loxAuthorized
+  // (unser eigenes, exakt auf das 'authorized'-Event getaktetes Flag) ist
+  // der korrekte Gate, nicht is_connected().
   function sendToLoxone(uuid, value) {
     const key = uuid.toLowerCase();
     if (!LOX_UUID_RE.test(key)) {
@@ -654,10 +669,7 @@ async function main() {
       return;
     }
     if (!loxAuthorized) {
-      console.warn(`[cmd] Noch nicht bei Loxone authentifiziert — Befehl trotzdem versucht: ${key} = ${value}`);
-    }
-    if (typeof loxApi.is_connected === 'function' && !loxApi.is_connected()) {
-      console.error(`[cmd] Keine Loxone-Verbindung — Befehl verworfen: ${key} = ${value}`);
+      console.warn(`[cmd] Noch nicht bei Loxone authentifiziert — Befehl verworfen: ${key} = ${value}`);
       return;
     }
     if (logLevel.enabled(logLevel.DEBUG)) console.log(`[cmd] jdev/sps/io/${key}/${value}`);
